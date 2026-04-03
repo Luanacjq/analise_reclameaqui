@@ -7,6 +7,8 @@ import matplotlib.pyplot as plt
 import nltk
 from nltk.corpus import stopwords
 import requests
+import plotly.express as px
+import unicodedata
 
 nltk.download("stopwords")
 
@@ -23,7 +25,20 @@ df["data_completa"] = pd.to_datetime(
     df["ANO"].astype(str) + "-" + df["MES"].astype(str) + "-01"
 )
 
-#filtros
+# função para normalizar texto
+def normalizar(texto):
+    if pd.isna(texto):
+        return ""
+    return unicodedata.normalize('NFKD', str(texto))\
+        .encode('ascii', 'ignore')\
+        .decode('utf-8')\
+        .lower()
+
+# normalizar cidade
+if "CIDADE" in df.columns:
+    df["CIDADE"] = df["CIDADE"].apply(normalizar)
+
+# filtros
 st.sidebar.header("Filtros")
 
 estado = st.sidebar.multiselect(
@@ -45,7 +60,7 @@ if "CIDADE" in df.columns:
         default=df["CIDADE"].dropna().unique()
     )
 else:
-    municipio = df["ESTADO"]  # fallback
+    municipio = df["ESTADO"]
 
 texto_min, texto_max = st.sidebar.slider(
     "Tamanho do texto",
@@ -53,6 +68,10 @@ texto_min, texto_max = st.sidebar.slider(
     int(df["tamanho_texto"].max()),
     (int(df["tamanho_texto"].min()), int(df["tamanho_texto"].max()))
 )
+
+# 🔎 CHAT / BUSCA INTELIGENTE
+st.sidebar.subheader("🔎 Busca Inteligente")
+busca = st.sidebar.text_input("Digite um problema (ex: entrega, cobrança)")
 
 df_filtrado = df[
     (df["ESTADO"].isin(estado)) &
@@ -63,7 +82,29 @@ df_filtrado = df[
 if "CIDADE" in df.columns:
     df_filtrado = df_filtrado[df_filtrado["CIDADE"].isin(municipio)]
 
-#metricas
+# 🔎 FILTRO POR TEXTO (CHAT)
+if busca:
+    palavras_busca = normalizar(busca).split()
+
+    df_filtrado = df_filtrado[
+        df_filtrado["DESCRICAO"].astype(str).apply(
+            lambda x: all(p in normalizar(x) for p in palavras_busca)
+        )
+    ]
+
+    st.info(f"Mostrando resultados para: '{busca}'")
+
+    total = len(df_filtrado)
+    nao_resolvidas = len(df_filtrado[df_filtrado["STATUS"] == "nao resolvido"])
+
+    if total > 0:
+        st.success(
+            f"Foram encontradas {total} reclamações. "
+        )
+    else:
+        st.warning("Nenhuma reclamação encontrada.")
+
+# métricas
 col1, col2, col3, col4, col5, col6 = st.columns(6)
 
 col1.metric("Total de Reclamações", len(df_filtrado))
@@ -75,7 +116,18 @@ col6.metric("Não Resolvidas", len(df_filtrado[df_filtrado["STATUS"] == "nao res
 
 st.divider()
 
-#serie temporal
+# exemplos reais (🔥 diferencial)
+if busca:
+    st.subheader("Exemplos de Reclamações")
+
+    exemplos = df_filtrado[["ID", "DESCRICAO"]].dropna().head(5)
+
+    for _, row in exemplos.iterrows():
+        st.markdown(f"### 🧾 Reclamação {row['ID']}")
+        st.write(row["DESCRICAO"])
+        st.divider()
+
+# série temporal
 st.subheader("Evolução das Reclamações")
 
 tipo_tempo = st.radio("Visualização", ["Mensal", "Semanal"])
@@ -109,7 +161,7 @@ fig.add_trace(go.Scatter(
 
 st.plotly_chart(fig, use_container_width=True)
 
-#cruzamento
+# cruzamento
 st.subheader("Status por Estado")
 
 top_estados = df_filtrado["ESTADO"].value_counts().nlargest(10).index
@@ -125,7 +177,13 @@ fig_estado = px.bar(
     y="quantidade",
     color="STATUS",
     barmode="group",
-    color_discrete_sequence=px.colors.qualitative.Set2
+    color_discrete_map={
+        "resolvido": "green",
+        "respondida": "blue",
+        "em replica": "gold",
+        "nao resolvido": "red",
+        "nao respondida": "orange"
+    }
 )
 
 fig_estado.update_layout(
@@ -135,7 +193,7 @@ fig_estado.update_layout(
 
 st.plotly_chart(fig_estado, use_container_width=True)
 
-#mapa do brasil
+# mapa do brasil
 st.subheader("Mapa de Reclamações")
 
 nivel_mapa = st.radio("Visualização do mapa", ["Estado", "Município"])
@@ -159,9 +217,28 @@ if nivel_mapa == "Estado":
     st.plotly_chart(fig_mapa, use_container_width=True)
 
 else:
-    st.warning("Mapa por município requer geojson de cidades")
+    url_geo_cidades = "https://raw.githubusercontent.com/tbrugz/geodata-br/master/geojson/geojs-100-mun.json"
+    geojson_cidades = requests.get(url_geo_cidades).json()
 
-#pareto
+    for feature in geojson_cidades["features"]:
+        feature["properties"]["name"] = normalizar(feature["properties"]["name"])
+
+    mapa_cidades = df_filtrado.groupby("CIDADE").size().reset_index(name="quantidade")
+
+    fig = px.choropleth(
+        mapa_cidades,
+        geojson=geojson_cidades,
+        locations="CIDADE",
+        featureidkey="properties.name",
+        color="quantidade",
+        color_continuous_scale="Blues"
+    )
+
+    fig.update_geos(fitbounds="locations", visible=False)
+
+    st.plotly_chart(fig, use_container_width=True)
+
+# pareto
 st.subheader("Estados com Mais Reclamações")
 
 pareto = df_filtrado.groupby("ESTADO").size().reset_index(name="quantidade")
@@ -177,7 +254,7 @@ fig_pareto = px.bar(
 
 st.plotly_chart(fig_pareto, use_container_width=True)
 
-#status
+# status
 st.subheader("Distribuição de Status")
 
 status_count = df_filtrado["STATUS"].value_counts().reset_index()
@@ -187,12 +264,19 @@ fig_status = px.pie(
     status_count,
     names="STATUS",
     values="quantidade",
-    color_discrete_sequence=px.colors.qualitative.Pastel
+    color="STATUS",
+    color_discrete_map={
+        "resolvido": "green",
+        "respondida": "blue",
+        "em replica": "gold",
+        "nao resolvido": "red",
+        "nao respondida": "orange"
+    }
 )
 
 st.plotly_chart(fig_status, use_container_width=True)
 
-#boxplot
+# boxplot
 st.subheader("Tamanho das Reclamações por Status")
 
 fig_box = px.box(
@@ -200,12 +284,18 @@ fig_box = px.box(
     x="STATUS",
     y="tamanho_texto",
     color="STATUS",
-    color_discrete_sequence=px.colors.qualitative.Set3
+    color_discrete_map={
+        "resolvido": "green",
+        "respondida": "blue",
+        "em replica": "gold",
+        "nao resolvido": "red",
+        "nao respondida": "orange"
+    }
 )
 
 st.plotly_chart(fig_box, use_container_width=True)
 
-#worldcloud
+# wordcloud
 st.subheader("Palavras mais Frequentes")
 
 stop_words = set(stopwords.words("portuguese"))
